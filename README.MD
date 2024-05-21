@@ -35,11 +35,7 @@ Downloaded dependent materials are placed in the `deps` folder.
 
 ### 3. Pre-train model
 
-Run the script to download the pre-train model
-
-```
-bash prepare/download_pretrained_models.sh
-```
+Pleace download the pre-train model from [BaiDu diven]( https://pan.baidu.com/s/1_ICZEuv80oOt-X2nMMZktA?pwd=q5w3) (password: q5w3).
 
 
 ### 4. Data
