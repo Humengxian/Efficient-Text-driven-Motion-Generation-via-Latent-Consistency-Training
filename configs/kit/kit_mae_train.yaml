@@ -1,0 +1,46 @@
+accelerator: gpu
+state: mae
+condition: text
+
+data:
+  name: kit
+  root: data/KIT-ML
+  max_motion_length: 196
+  min_motion_length: 24
+  max_text_len: 20
+  joints_num: 21
+  dim_pose: 251
+  unit_length: 4
+  
+train:    
+  split: train
+  batchsize: 64
+  num_workers: 8
+  lr: 1e-4
+  lr_min: 1e-6
+  weight_decay: 0.01
+
+  test_epochs: 50
+  save_epochs: 100
+  epochs: 1500
+  lambda_joint: 0.
+  lambda_kl: 0.
+
+  loss: l1smooth
+
+test:
+  batchsize: 128
+  num_workers: 8
+  split: test
+
+motion_ae:
+  type: qae # or vae
+  node: 1000
+  token_num: 3
+  activation: gelu
+  dim: 256
+  ff_dim: 1024
+  dropout: 0.1
+  encode_layer: 7
+  decode_layer: 7
+  timestep_condition: True

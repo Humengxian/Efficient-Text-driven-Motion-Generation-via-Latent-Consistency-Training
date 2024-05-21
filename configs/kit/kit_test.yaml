@@ -1,0 +1,64 @@
+accelerator: gpu
+state: mlct
+condition: text
+debug: False
+
+data:
+  name: kit
+  root: data/KIT-ML
+  max_motion_length: 196
+  min_motion_length: 24
+  max_text_len: 20
+  joints_num: 21
+  dim_pose: 251
+  unit_length: 4
+
+eval:
+  t2m_textencoder:
+    dim_word: 300
+    dim_pos_ohot: 15
+    dim_text_hidden: 512
+    dim_coemb_hidden: 512
+
+  t2m_motionencoder:
+    dim_move_hidden: 512
+    dim_move_latent: 512
+    dim_motion_hidden: 1024
+    dim_motion_latent: 512
+
+train:    
+  split: train
+  batchsize: 64
+  num_workers: 8
+  lr: 1e-4
+  lr_min: 1e-6
+  weight_decay: 0.01
+
+  test_epochs: 50
+  visual_epochs: 50
+  save_epochs: 100
+  epochs: 2000
+
+  w: 1.
+  skip_steps: 10
+  sample_steps: 5
+  ema_rate: 0.995
+  loss: pseudo_huber
+
+test:
+  batchsize: 1
+  split: test
+  
+  replication_times: 20
+  diversity_times: 300
+  mm_num_times: 10
+  mm_num_samples: 100
+  mm_num_repeats: 30
+
+motion_ae:
+  pretrain_dir: pretrain/kit/mae
+  pretrain_model_name: kit_mae.pth
+
+diffusion:
+  pretrain_dir: pretrain/kit/mlct
+  pretrain_model_name: kit_mlct.pth
