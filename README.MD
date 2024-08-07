@@ -35,7 +35,7 @@ Downloaded dependent materials are placed in the `deps` folder.
 
 ### 3. Pre-train model
 
-Pleace download the pre-train model from [BaiDu diven]( https://pan.baidu.com/s/1_ICZEuv80oOt-X2nMMZktA?pwd=q5w3) (password: q5w3).
+Pleace download the pre-train model from [BaiDu diven]( https://pan.baidu.com/s/1_ICZEuv80oOt-X2nMMZktA?pwd=q5w3) (password: q5w3) or [Google Diven](https://drive.google.com/drive/folders/1B6lGF4K_7rz8yZEVNttw0T1SGVAwJm9G?usp=drive_link).
 
 
 ### 4. Data
