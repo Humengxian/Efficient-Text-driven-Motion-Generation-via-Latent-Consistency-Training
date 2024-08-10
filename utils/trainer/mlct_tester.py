@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from .monitor import AverageMeter
 from tqdm import tqdm
 from ..data.utils import lengths_to_mask
-from ..model.operator.clip_module import CLIPTextEncoder
+from ..model.operator.clip_module import BertTextEncoder, CLIPTextEncoder
 from ..model.diffusion import Diffusion
 from ..model.network import t2m_motionenc, t2m_textenc
 from ..visual.plot_script import plot_3d_motion
@@ -72,7 +72,10 @@ class MLCTTester(object):
         # prepare model
         mae = model['mae']
         denoiser = model['denoiser']
-        model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path, last_hidden_state=False).to(self.device)
+        if 'clip' in cfg.diffusion.text_path or "clip_path" in cfg.diffusion.keys():
+            model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path if "clip_path" in cfg.diffusion.keys() else cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+        else:
+            model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
         mae = mae.to(self.device)
         denoiser = denoiser.to(self.device)
         
