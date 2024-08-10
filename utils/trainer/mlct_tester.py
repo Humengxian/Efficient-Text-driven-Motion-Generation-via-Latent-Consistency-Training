@@ -72,10 +72,13 @@ class MLCTTester(object):
         # prepare model
         mae = model['mae']
         denoiser = model['denoiser']
-        if 'clip' in cfg.diffusion.text_path or "clip_path" in cfg.diffusion.keys():
-            model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path if "clip_path" in cfg.diffusion.keys() else cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+        if 'clip_path' in cfg.diffusion.keys():
+            model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path, last_hidden_state=False).to(self.device)
         else:
-            model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            if 'clip' in cfg.diffusion.text_path:
+                model['condition'] = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            else:
+                model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
         mae = mae.to(self.device)
         denoiser = denoiser.to(self.device)
         
