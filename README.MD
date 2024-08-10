@@ -29,6 +29,7 @@ Follow the [MLD](https://github.com/ChenFengYe/motion-latent-diffusion) and run 
 bash prepare/download_smpl_model.sh
 bash prepare/prepare_clip.sh
 bash prepare/download_t2m_evaluators.sh
+bash prepare/prepare_t5.sh
 ```
 
 Downloaded dependent materials are placed in the `deps` folder.
