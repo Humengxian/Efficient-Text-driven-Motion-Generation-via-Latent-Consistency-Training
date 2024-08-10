@@ -22,3 +22,4 @@ matplotlib
 einops
 torchmetrics
 smplx
+sentence-transformers==2.2.2
