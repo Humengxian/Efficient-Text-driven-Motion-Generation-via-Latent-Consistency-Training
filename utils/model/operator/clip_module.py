@@ -1,4 +1,6 @@
 from re import T
+from turtle import forward
+from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoTokenizer
 from typing import List
 import torch.nn as nn
@@ -84,4 +86,32 @@ class CLIPTextEncoder(nn.Module):
         else:
             raise NotImplementedError(f"Model {self.name} not implemented")
 
+        return text_embeddings
+
+
+class BertTextEncoder(nn.Module):
+    def __init__(
+        self,
+        modelpath: str,
+        finetune: bool = False,
+        last_hidden_state: bool = False,
+        latent_dim: list = [1, 256],
+    ) -> None:
+
+        super().__init__()
+
+        self.text_model = SentenceTransformer(modelpath)
+        self.tokenizer = self.text_model.tokenizer
+
+        # Don't train the model
+        if not finetune:
+            self.text_model.training = False
+            for p in self.text_model.parameters():
+                p.requires_grad = False
+
+        self.text_model.eval()
+
+    def forward(self, sentences):
+        text_embeddings = self.text_model.encode(sentences, show_progress_bar=False, convert_to_tensor=True, batch_size=len(sentences))
+        text_embeddings = text_embeddings.unsqueeze(1)
         return text_embeddings
