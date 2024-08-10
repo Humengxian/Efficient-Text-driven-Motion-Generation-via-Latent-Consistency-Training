@@ -71,6 +71,8 @@ Then, run the following command:
 
 ```
 python -m tools.test --cfg configs/humanml/humanml_test.yaml
+
+python -m tools.test --cfg configs/humanml/humanml_test_t5.yaml
 ```
 
 ## Acknowledgments
