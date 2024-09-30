@@ -1,16 +1,15 @@
 accelerator: gpu
 state: mlct
 condition: text
-debug: False
 
 data:
-  name: kit
-  root: data/KIT-ML
+  name: humanml3d
+  root: data/HumanML3D
   max_motion_length: 196
-  min_motion_length: 24
+  min_motion_length: 40
   max_text_len: 20
-  joints_num: 21
-  dim_pose: 251
+  joints_num: 22
+  dim_pose: 263
   unit_length: 4
   
 train:    
@@ -24,13 +23,15 @@ train:
   test_epochs: 50
   visual_epochs: 50
   save_epochs: 100
-  epochs: 2000
+  epochs: 600
 
-  w: 2.
-  skip_steps: 20
-  sample_steps: 5
+  w: 1.
+  skip_steps: 40
+  sample_steps: 4
   ema_rate: 0.995
   loss: pseudo_huber
+
+  lambda_uncod: 1.
 
 eval:
   t2m_textencoder:
@@ -49,7 +50,6 @@ test:
   batchsize: 1
   split: test
   
-  rep_i: 0
   replication_times: 20
   diversity_times: 300
   mm_num_times: 10
@@ -58,21 +58,23 @@ test:
   type: ['TM2TMetrics']
 
 motion_ae:
-  pretrain_dir: pretrain/kit/mae
-  pretrain_model_name: kit_mae.pth
+  pretrain_dir: pretrain/humanml/mae
+  pretrain_model_name: BestMAE.pth
 
 diffusion:
   dim: 512
   ff_dim: 2048
   dropout: 0.1
-  layer: 11
+  layer: 9
+  n_cluster: 2048
+  lowdim: 768
   num_timesteps: 1000
-  clip_path: deps/clip-vit-large-patch14
+  text_path: deps/sentence-t5-large
 
   type: vpode
   timeschedule: karras
   sigma_min: 0.002
   sigma_max: 1.
-  rho: 2
+  rho: 7
 
   uncod_type: trainable

@@ -1,5 +1,6 @@
 import torch.nn.functional as F
 import torch
+import time
 import numpy as np
 from ..data.utils import lengths_to_mask
 
@@ -145,11 +146,6 @@ class Diffusion(object):
         else:
             self.timesteps_schedule = karras_schedule(num_timesteps=cfg.diffusion.num_timesteps//self.skip_steps, sigma_min=cfg.diffusion.sigma_min, sigma_max=cfg.diffusion.sigma_max, rho=cfg.diffusion.rho, device=cfg.device + str(cfg.gpu))
 
-        if cfg.debug:
-            import matplotlib.pyplot as plt
-            plt.plot(range(len(self.timesteps_schedule)), self.timesteps_schedule.cpu().numpy())
-            plt.show()
-
     def add_noise(self, x, noise=None, t=0, eps=1e-5):
         if noise is None:
             noise = torch.randn_like(x)
@@ -201,22 +197,21 @@ class Diffusion(object):
         pred_out = denoiser(
             x_t=noisy_model_input, 
             timesteps=t, 
-            latent_text=latent_cond
+            text_emb=latent_cond
         )
 
-        if self.cfg.diffusion.uncod_type == 'trainable':
-            pred_out_uncond = denoiser(
-                x_t=noisy_model_input, 
-                timesteps=t, 
-                latent_text=latent_cond_none
-            )
+        pred_out_uncond = denoiser(
+            x_t=noisy_model_input, 
+            timesteps=t, 
+            text_emb=latent_cond_none
+        )
 
         with torch.no_grad():
-            cond_x_0 = latents
             # cfg step
+            cond_x_0 = latents
             uncond_x_0 = pred_out_uncond
-
             pred_x0 = cond_x_0 + self.cfg.train.w * (cond_x_0 - uncond_x_0)
+
             if self.cfg.motion_ae.type == 'qae':
                 pred_x0 = pred_x0.clamp(-1, 1)
 
@@ -225,22 +220,40 @@ class Diffusion(object):
             pred_out_ema = diffusion_ema(
                 x_t=noisy_model_input_prev, 
                 timesteps=t_offset, 
-                latent_text=latent_cond
+                text_emb=latent_cond
             )
 
         weight = (1 / (t - t_offset)).clamp(min=1e-5, max=1e7)
 
-        if self.cfg.train.loss == 'pseudo_huber':
-            if self.cfg.diffusion.uncod_type == 'trainable':
-                loss = pseudo_huber_loss(pred_out_uncond, latents).mean()
-            else:
-                loss = 0
-
-            loss += (pseudo_huber_loss(pred_out, pred_out_ema) * append_dims(weight, pred_out.ndim)).mean()
+        if self.cfg.train.w != 0:
+            loss = self.cfg.train.lambda_uncod * pseudo_huber_loss(pred_out_uncond, latents).mean()
         else:
-            loss = F.mse_loss(pred_out, pred_out_ema)
+            loss = 0
+
+        loss += (pseudo_huber_loss(pred_out, pred_out_ema) * append_dims(weight, pred_out.ndim)).mean()
+        
 
         return loss
+    
+    def cal_mld_loss(self, latents, latent_cond, denoiser):
+        noise = torch.randn_like(latents)
+
+        # time schedule
+        t = torch.randint(1, self.num_timesteps // self.skip_steps, (latents.shape[0], ), device=latents.device)
+        t = self.timesteps_schedule[t]
+
+        noisy_model_input = self.add_noise(latents, noise, t)
+
+        pred_out = denoiser(
+            x_t=noisy_model_input, 
+            timesteps=t, 
+            text_emb=latent_cond
+        )
+
+        loss = pseudo_huber_loss(pred_out, latents).mean()
+
+        return loss
+
     
     @torch.no_grad()
     def sample(self, bs, lengths, condition, steps, denoiser, motion_encoder, condition_encoder, device='cuda:0'):
@@ -258,7 +271,7 @@ class Diffusion(object):
             t = torch.full((bs,), reverse_time[t_idx], device=device, dtype=torch.float)
             x = denoiser(
                 x_t,
-                t,
+                t, 
                 latent_condition
             )
 
@@ -271,3 +284,40 @@ class Diffusion(object):
         mask = lengths_to_mask(lengths, device=device)
         pred_motion = motion_encoder.motion_decode(x, ~mask)
         return pred_motion
+    
+    @torch.no_grad()
+    def test_time(self, bs, lengths, condition, steps, denoiser, motion_encoder, condition_encoder, device='cuda:0'):
+        shape = (bs, denoiser.token_num, denoiser.latent_dim)
+
+        x_T = torch.randn(shape, device=device) * self.cfg.diffusion.sigma_max
+        
+        start_time = time.time()
+        latent_condition = condition_encoder(condition).to(device)
+        condition_time = time.time() - start_time
+
+        x_t = x_T
+        reverse_time = list(int(r_t) for r_t in np.linspace((self.num_timesteps // self.cfg.train.skip_steps) - 1, 0, steps+1))
+        reverse_time = self.timesteps_schedule[reverse_time]
+
+        start_time = time.time()
+        for t_idx in range(len(reverse_time) - 1):
+            t = torch.full((bs,), reverse_time[t_idx], device=device, dtype=torch.float)
+            x = denoiser(
+                x_t,
+                t, 
+                latent_condition
+            )
+
+            if motion_encoder.type_ == 'qae':
+                x = x.clamp(-1, 1)
+
+            if t_idx < len(reverse_time) - 1:
+                x_t = self.add_noise(x, torch.randn_like(x_T), t=torch.tensor(reverse_time[t_idx+1].clone().detach(), device=device))
+        denoiser_time = time.time() - start_time
+
+        mask = lengths_to_mask(lengths, device=device)
+        start_time = time.time()
+        pred_motion = motion_encoder.motion_decode(x, ~mask)
+        decoder_time = time.time() - start_time
+        return pred_motion, [condition_time, denoiser_time, decoder_time]
+    

@@ -1,3 +1,6 @@
+# import os
+# os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+
 from utils.config import train_mlct_parse_args
 from utils.data.base import get_datasets
 from utils.model.base import get_models
