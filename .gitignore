@@ -1,5 +1,5 @@
 pretrain/*
 deps/*
 experiments/*
-experiments_backup/*
 sample/*
+data/*
