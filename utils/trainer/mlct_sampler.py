@@ -5,8 +5,9 @@ import torch
 from ..data.humanml.scripts.motion_process import (process_file, recover_from_ric)
 from ..visual import paramUtil
 from ..visual.plot_script import plot_3d_motion
-from ..model.operator.clip_module import CLIPTextEncoder
+from ..model.operator.clip_module import CLIPTextEncoder, BertTextEncoder
 from ..model.diffusion import Diffusion
+from scipy.ndimage import gaussian_filter
 
 def load_state_dict(path, model):
     checkpoint = torch.load(path)
@@ -16,17 +17,30 @@ def load_state_dict(path, model):
     model.load_state_dict(model_dict)
     return model
 
+def motion_temporal_filter(motion, sigma=1):
+    motion = motion.reshape(motion.shape[0], -1)
+    for i in range(motion.shape[1]):
+        motion[:, i] = gaussian_filter(motion[:, i], sigma=sigma, mode="nearest")
+    return motion.reshape(motion.shape[0], -1, 3)
+
 class Sampler(object):
     def __init__(self, cfg) -> None:
         self.cfg = cfg
+        self.device = cfg.device + str(cfg.gpu)
+
         # diffusion
         self.diffusion = Diffusion(cfg)
 
         # text encoder
-        self.text_encoder = CLIPTextEncoder(cfg.diffusion.clip_path, last_hidden_state=False)
-        self.text_encoder.eval().to(device=cfg.device + str(cfg.gpu))
-        self.device = cfg.device + str(cfg.gpu)
+        if 'clip' in cfg.diffusion.text_path:
+            self.text_encoder = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            self.text_name = 'clip'
+        else:
+            self.text_encoder = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            self.text_name = 't5'
 
+        self.text_encoder.eval()
+        
         # mean & std
         data_root = cfg.data.root
         self.mean = np.load(os.path.join(data_root, "Mean.npy"))
@@ -48,20 +62,21 @@ class Sampler(object):
         lengths = torch.tensor([length for i in range(bs)]).long()
 
         # sample
-        for i in range(50):
-            sample = self.diffusion.sample(bs=len(lengths), lengths=lengths, condition=text, steps=step, denoiser=model['denoiser'], motion_encoder=model['mae'],
-                                            condition_encoder=self.text_encoder, device=self.device)
-            
-        start_time = time.time()
-        for i in range(100):
-            sample = self.diffusion.sample(bs=len(lengths), lengths=lengths, condition=text, steps=step, denoiser=model['denoiser'], motion_encoder=model['mae'],
-                                                condition_encoder=self.text_encoder, device=self.device)
-        print((time.time() - start_time) / 100)
-
+        sample = self.diffusion.sample(bs=bs, 
+                                       lengths=lengths, 
+                                       condition=text, 
+                                       steps=step, 
+                                       denoiser=model['denoiser'], 
+                                       motion_encoder=model['mae'],
+                                       condition_encoder=self.text_encoder, 
+                                       device=self.device)
+        
         # recover
         joints = self.feats2joints(sample)
+        
         if bs == 1:
             joints = joints[0, :lengths[0]].detach().cpu().numpy()
+            joints = motion_temporal_filter(joints, sigma=2.5)
             # joints = joints[len_mask].detach().cpu().numpy()
             plot_3d_motion(os.path.join(self.cfg.sample_dir, f"{file_name}.gif"), self.skeleton, joints, dataset=self.cfg.data.name, title=text[0], fps=self.fps)
             np.save(os.path.join(self.cfg.sample_dir, f"{file_name}.npy"), joints)
@@ -69,6 +84,7 @@ class Sampler(object):
             for _bs in range(bs):
                 # joint = joints[_bs, len_mask[_bs]].detach().cpu().numpy()
                 joint = joints[_bs, :lengths[_bs]].detach().cpu().numpy()
+                joint = motion_temporal_filter(joint, sigma=2.5)
                 plot_3d_motion(os.path.join(self.cfg.sample_dir, f"{file_name}_{_bs}.gif"), self.skeleton, joint, dataset=self.cfg.data.name, title=text[_bs], fps=self.fps)
         
                 np.save(os.path.join(self.cfg.sample_dir, f"{file_name}_{_bs}.npy"), joint)

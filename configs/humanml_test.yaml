@@ -45,9 +45,9 @@ test:
   mm_num_repeats: 30
 
 motion_ae:
-  pretrain_dir: pretrain/humanml/mae
+  pretrain_dir: pretrain/mae
   pretrain_model_name: BestMAE.pth
 
 diffusion:
-  pretrain_dir: pretrain/humanml/mlct
+  pretrain_dir: pretrain/mlct
   pretrain_model_name: BestMLCT.pth

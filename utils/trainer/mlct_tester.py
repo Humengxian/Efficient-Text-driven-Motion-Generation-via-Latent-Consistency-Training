@@ -17,6 +17,7 @@ from ..metrics.tm2t import TM2TMetrics
 from ..metrics.mm import MMMetrics
 from rich.table import Table
 from rich import get_console
+from ..cluster import cluster_reset, cluster_load
 
 def print_table(title, metrics):
     table = Table(title=title)
@@ -72,15 +73,26 @@ class MLCTTester(object):
         # prepare model
         mae = model['mae']
         denoiser = model['denoiser']
-        if 'clip_path' in cfg.diffusion.keys():
-            model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path, last_hidden_state=False).to(self.device)
-        else:
-            if 'clip' in cfg.diffusion.text_path:
-                model['condition'] = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
-            else:
-                model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+
         mae = mae.to(self.device)
         denoiser = denoiser.to(self.device)
+
+        if 'clip' in cfg.diffusion.text_path:
+            model['condition'] = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 'clip'
+            # if '14' in cfg.diffusion.text_path:
+            #     text_name = 'clip_14'
+            # else:
+            #     text_name = 'clip_32'
+        else:
+            model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 't5'
+            
+        if not os.path.exists(os.path.join(cfg.motion_ae.pretrain_dir, f'clusters_{text_name}_{cfg.diffusion.n_cluster}.plk')):
+            cluster_reset(cfg, self.device, mae, model['condition'], denoiser, None, text_name)
+        else:
+            cluster_load(cfg, text_name, denoiser, None)
+
         
         # prepare
         diffusion = Diffusion(cfg)
@@ -325,3 +337,65 @@ class MLCTTester(object):
         result = self.MMMetrics.compute()
 
         return result
+    
+    @torch.no_grad()
+    def test_infer_time(self, model, datamodule):
+        cfg = self.cfg
+
+        # prepare model
+        mae = model['mae']
+        denoiser = model['denoiser']
+
+        if 'clip' in cfg.diffusion.text_path:
+            condition_encoder = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 'clip'
+        else:
+            condition_encoder = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 't5'
+
+        # prepare
+        diffusion = Diffusion(cfg)
+
+        if not os.path.exists(os.path.join(cfg.motion_ae.pretrain_dir, f'clusters_{text_name}_{cfg.diffusion.n_cluster}.plk')):
+            cluster_reset(cfg, self.device, mae, model['condition'], denoiser, None, text_name)
+        else:
+            cluster_load(cfg, text_name, denoiser, None)
+
+        mae = mae.to(self.device)
+        denoiser = denoiser.to(self.device)
+
+        # dataloader
+        test_dataloader = datamodule.test_dataloader()
+
+        # warm up
+        condition_time_list = []
+        denoiser_time_list = []
+        decoder_time_list = []
+        total_list = []
+        for idx, batch in enumerate(test_dataloader):
+            texts = batch["text"]
+            lengths = batch["length"]
+
+            _, [condition_time, denoiser_time, decoder_time] = diffusion.test_time(bs=len(lengths), lengths=lengths, condition=texts, steps=self.cfg.train.sample_steps, denoiser=denoiser, motion_encoder=mae,
+                                                               condition_encoder=condition_encoder, device=self.device)
+
+            if idx > 200:
+                break
+
+        loop = tqdm(test_dataloader, total = len(test_dataloader))
+        for batch in loop:
+            texts = batch["text"]
+            lengths = batch["length"]
+
+            _, [condition_time, denoiser_time, decoder_time] = diffusion.test_time(bs=len(lengths), lengths=lengths, condition=texts, steps=self.cfg.train.sample_steps, denoiser=denoiser, motion_encoder=mae,
+                                                               condition_encoder=condition_encoder, device=self.device)
+            
+            condition_time_list.append(condition_time)
+            denoiser_time_list.append(denoiser_time)
+            decoder_time_list.append(decoder_time)
+            total_list.append(condition_time + denoiser_time + decoder_time)
+
+        self.logger.info(f"condition: {np.mean(condition_time_list):.6f};")
+        self.logger.info(f"denoiser: {np.mean(denoiser_time_list):.6f};")
+        self.logger.info(f"decoder: {np.mean(decoder_time_list):.6f};")
+        self.logger.info(f"total: {np.mean(total_list):.6f};")

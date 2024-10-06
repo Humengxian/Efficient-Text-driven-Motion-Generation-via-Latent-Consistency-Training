@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from .monitor import AverageMeter
 from tqdm import tqdm
 from ..data.utils import lengths_to_mask
-from ..model.operator.clip_module import CLIPTextEncoder
+from ..model.operator.clip_module import CLIPTextEncoder, BertTextEncoder
 from ..model.diffusion import Diffusion
 from ..model.network import t2m_motionenc, t2m_textenc
 from ..visual.plot_script import plot_3d_motion
@@ -15,7 +15,9 @@ from ..visual import paramUtil
 import numpy as np
 from ..metrics.tm2t import TM2TMetrics
 from ..metrics.gru import HUMANACTMetrics
+from ..metrics.mm import MMMetrics
 from ..transforms.rotation2xyz import Rotation2xyz
+from ..cluster import cluster_reset, cluster_load
 
 condition_error = "condition must in ['text', 'action']"
 
@@ -44,6 +46,10 @@ class MLCTTrainer(object):
             self.TM2TMetrics = TM2TMetrics(
                 diversity_times=cfg.test.diversity_times
             )
+
+            self.MMMetrics = MMMetrics(
+                mm_num_times=cfg.test.mm_num_times
+            )
         elif self.condition == 'action':
             self.HUMANACTMetrics = HUMANACTMetrics(
                         datapath=os.path.join('deps', "humanact12_gru.tar"),
@@ -69,10 +75,14 @@ class MLCTTrainer(object):
         mae = model['mae']
         denoiser = model['denoiser']
         denoiser_ema = model['denoiser_ema']
-        if self.condition == 'text':
-            model['condition'] = CLIPTextEncoder(cfg.diffusion.clip_path, last_hidden_state=False).to(self.device)
+
+        if 'clip' in cfg.diffusion.text_path:
+            model['condition'] = CLIPTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 'clip'
         else:
-            model['condition'] = nn.Embedding(num_embeddings=12, embedding_dim=768)
+            model['condition'] = BertTextEncoder(cfg.diffusion.text_path, last_hidden_state=False).to(self.device)
+            text_name = 't5'
+
         mae = mae.to(self.device)
         denoiser = denoiser.to(self.device)
         denoiser_ema = denoiser_ema.to(self.device)
@@ -80,6 +90,17 @@ class MLCTTrainer(object):
         # prepare
         diffusion = Diffusion(cfg)
 
+        if 'cg' in cfg.diffusion.keys():
+            if cfg.diffusion.cg:
+                if not os.path.exists(os.path.join(cfg.motion_ae.pretrain_dir, f'clusters_{text_name}_{cfg.diffusion.n_cluster}.plk')):
+                    cluster_reset(cfg, self.device, mae, model['condition'], denoiser, denoiser_ema, text_name)
+                else:
+                    cluster_load(cfg, text_name, denoiser, denoiser_ema)
+        else:
+            if not os.path.exists(os.path.join(cfg.motion_ae.pretrain_dir, f'clusters_{text_name}_{cfg.diffusion.n_cluster}.plk')):
+                cluster_reset(cfg, self.device, mae, model['condition'], denoiser, denoiser_ema, text_name)
+            else:
+                cluster_load(cfg, text_name, denoiser, denoiser_ema)
         # optimizer
         if self.condition == 'text':
             params = [{'params': denoiser.parameters()}]
@@ -87,6 +108,7 @@ class MLCTTrainer(object):
             params = [{'params': denoiser.parameters()}, {'params': model['condition'].parameters()}]
         else:
             assert 0, "condition must in ['text', 'action']"
+            
         optimizer = AdamW(lr=cfg.train.lr, params=params)
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfg.train.epochs, eta_min=cfg.train.lr_min, last_epoch=-1)
 
@@ -125,6 +147,7 @@ class MLCTTrainer(object):
             
 
         best_FID = 1000
+        best_R3 = 0
 
         # dataloader
         train_dataloader = datamodule.train_dataloader()
@@ -138,26 +161,35 @@ class MLCTTrainer(object):
             self.logger.info(f'Epoch {epoch} Train Loss {train_loss:.6f} EMA Rate {ema_rate}.')
 
             if (epoch + 1) % cfg.train.test_epochs == 0:
-                FID_list = self.test_step(model, test_dataloader, diffusion, epoch)
+                FID_list, R3_list , MM_list= self.test_step(model, test_dataloader, diffusion, epoch)
                 self.logger.info(f'Epoch {epoch + 1} FID List {FID_list} FID {np.mean(FID_list):.6f}.')
+                self.logger.info(f'Epoch {epoch + 1} R3 List {R3_list} R3 {np.mean(R3_list):.6f}.')
+                self.logger.info(f'Epoch {epoch + 1} MM List {MM_list} MM {np.mean(MM_list):.6f}.')
 
                 with open(os.path.join(cfg.output_dir, 'FID.txt'), 'a') as f:
-                    f.write(f'{epoch + 1},{np.mean(FID_list):.6f};\n')
+                    f.write(f'{epoch + 1},FID:{np.mean(FID_list):.6f}  R3:{np.mean(R3_list):.6f}  MM:{np.mean(MM_list):.6f};\n')
 
                 if np.mean(FID_list) < best_FID:
                     best_FID = np.mean(FID_list)
-                    torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_Best_FID.pth'))
+                    torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_Best_FID_ema.pth'))
+                    torch.save(model['denoiser'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_Best_FID.pth'))
                     self.logger.info(f'Save Best {np.mean(FID_list):.6f}.')
 
-            # if (epoch + 1) % cfg.train.visual_epochs == 0:
-            #     self.visual_step(model, test_dataloader, diffusion, epoch)
+                    if np.mean(R3_list) < best_R3:
+                        best_R3 = np.mean(R3_list)
+                        
+                # elif np.mean(R3_list) > best_R3:
+                #     best_R3 = np.mean(R3_list)
+                #     torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_Best_R3.pth'))
+                #     self.logger.info(f'Save Best {np.mean(R3_list):.6f}.')
 
-            if (epoch + 1) % cfg.train.save_epochs == 0:
-                torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_{epoch+1:04d}_loss_{train_loss:.4f}.pth'))
-                if self.condition == 'action':
-                    torch.save(model['condition'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_{epoch+1:04d}_condition.pth'))
+            # if (epoch + 1) % cfg.train.save_epochs == 0:
+            #     torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Epoch_{epoch + 1}.pth'))
 
             lr_scheduler.step()
+
+        torch.save(model['denoiser_ema'].state_dict(), os.path.join(cfg.save_dir, f'Finest_ema.pth'))
+        torch.save(model['denoiser'].state_dict(), os.path.join(cfg.save_dir, f'Finest.pth'))
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -234,16 +266,7 @@ class MLCTTrainer(object):
                 latent, _ = mae.motion_encode(motion, ~mask)
                 latent_cond = condition_encoder(cond).to(self.device)
 
-                if self.cfg.diffusion.uncod_type == 'trainable':
-                    if self.condition == 'text':
-                        latent_cond_none = condition_encoder(['']).repeat(motion.shape[0], 1, 1)
-                    elif self.condition == 'action':
-                        latent_cond_none = torch.zeros((motion.shape[0], 1, 768), device=self.device)
-                    else:
-                        assert 0, condition_error
-                    
-                else:
-                    latent_cond_none = None
+                latent_cond_none = condition_encoder(['']).repeat(motion.shape[0], 1, 1)
 
             loss = diffusion.cal_loss(latent, latent_cond, latent_cond_none, denoiser, denoiser_ema)
             loss.backward()
@@ -290,115 +313,149 @@ class MLCTTrainer(object):
         
     @torch.no_grad()
     def test_step(self, model, test_dataloader, diffusion, epoch):
-        if self.condition == 'text':
-            mae = model['mae']
-            denoiser_ema = model['denoiser_ema']
-            condition_encoder = model['condition']
-            mae.eval()
-            denoiser_ema.eval()
-            condition_encoder.eval()
-            FID_list = []
-            for repeat_idx in range(3):
-                self.TM2TMetrics.init()
+        FID_list = []
+        R3_list = []
+        MM_list = []
+        for repeat_idx in range(3):
+            wo_mm_metrics = self.test_wo_mm_step(model, test_dataloader, diffusion, repeat_idx)
+            name_list = test_dataloader.dataset.name_list
+            mm_list = np.random.choice(name_list, self.cfg.test.mm_num_samples, replace=False)
+            test_dataloader.dataset.name_list = mm_list
 
-                loop = tqdm(enumerate(test_dataloader), total = len(test_dataloader))
-                for idx, batch in loop:
-                    texts = batch["text"]
-                    motions = batch["motion"].detach().clone()
-                    lengths = batch["length"]
-                    word_embs = batch["word_embs"].detach().clone()
-                    pos_ohot = batch["pos_ohot"].detach().clone()
-                    text_lengths = batch["text_len"].detach().clone()
+            mm_metrics = self.test_mm_step(model, test_dataloader, diffusion, repeat_idx)
+            test_dataloader.dataset.name_list = name_list
 
-                    motions = motions.to(self.device)
-                    word_embs = word_embs.to(self.device)
-                    pos_ohot = pos_ohot.to(self.device)
-                    text_lengths = text_lengths.to(self.device)
+            wo_mm_metrics.update(mm_metrics)
+            self.logger.info(str(wo_mm_metrics))
 
-                    feats_rst = diffusion.sample(bs=len(lengths), lengths=lengths, condition=texts, steps=self.cfg.train.sample_steps, denoiser=denoiser_ema, motion_encoder=mae,
-                                                condition_encoder=condition_encoder, device=self.device)
-                    
-                    # joints recover
-                    joints_rst = self.feats2joints(feats_rst)
-                    joints_ref = self.feats2joints(motions)
+            FID_list.append(wo_mm_metrics['FID'])
+            R3_list.append(wo_mm_metrics['R_precision_top_3'])
+            MM_list.append(wo_mm_metrics['MultiModality'])
 
-                    # renorm for t2m evaluators
-                    feats_rst = self.renorm4t2m(feats_rst)
-                    motions = self.renorm4t2m(motions)
+        return FID_list, R3_list, MM_list
+    
+    @torch.no_grad()
+    def test_wo_mm_step(self, model, test_dataloader, diffusion, epoch):
+        mae = model['mae']
+        denoiser = model['denoiser']
+        condition_encoder = model['condition']
+        mae.eval()
+        denoiser.eval()
+        condition_encoder.eval()
+        
+        self.TM2TMetrics.init()
 
-                    # t2m motion encoder
-                    m_lens = lengths.copy()
-                    m_lens = torch.tensor(m_lens, device=motions.device)
-                    align_idx = np.argsort(m_lens.data.tolist())[::-1].copy()
-                    motions = motions[align_idx]
-                    m_lens = m_lens[align_idx]
-                    m_lens = torch.div(m_lens, self.cfg.data.unit_length, rounding_mode="floor")
+        loop = tqdm(enumerate(test_dataloader), total = len(test_dataloader))
+        for idx, batch in loop:
+            texts = batch["text"]
+            motions = batch["motion"].detach().clone()
+            lengths = batch["length"]
+            word_embs = batch["word_embs"].detach().clone()
+            pos_ohot = batch["pos_ohot"].detach().clone()
+            text_lengths = batch["text_len"].detach().clone()
 
-                    recons_mov = self.t2m_moveencoder(feats_rst[..., :-4]).detach()
-                    recons_emb = self.t2m_motionencoder(recons_mov, m_lens)
-                    motion_mov = self.t2m_moveencoder(motions[..., :-4]).detach()
-                    motion_emb = self.t2m_motionencoder(motion_mov, m_lens)
+            motions = motions.to(self.device)
+            word_embs = word_embs.to(self.device)
+            pos_ohot = pos_ohot.to(self.device)
+            text_lengths = text_lengths.to(self.device)
 
-                    # t2m text encoder
-                    text_emb = self.t2m_textencoder(word_embs, pos_ohot, text_lengths)[align_idx]
+            feats_rst = diffusion.sample(bs=len(lengths), lengths=lengths, condition=texts, steps=self.cfg.train.sample_steps, denoiser=denoiser, motion_encoder=mae,
+                                        condition_encoder=condition_encoder, device=self.device)
 
-                    self.TM2TMetrics.update(
-                        text_embeddings=text_emb,
-                        recmotion_embeddings=recons_emb,
-                        gtmotion_embeddings=motion_emb,
-                        lengths=batch["length"]
-                    )
+            # renorm for t2m evaluators
+            feats_rst = self.renorm4t2m(feats_rst)
+            motions = self.renorm4t2m(motions)
 
-                    loop.set_description(f'Test  Epoch [{epoch+1}/{self.cfg.train.epochs}]')
+            # t2m motion encoder
+            m_lens = lengths.copy()
+            m_lens = torch.tensor(m_lens, device=motions.device)
+            align_idx = np.argsort(m_lens.data.tolist())[::-1].copy()
+            motions = motions[align_idx]
+            m_lens = m_lens[align_idx]
+            m_lens = torch.div(m_lens, self.cfg.data.unit_length, rounding_mode="floor")
 
-                result = self.TM2TMetrics.compute()
-                FID_list.append(result['FID'])
-        elif self.condition == 'action':
-            mae = model['mae']
-            denoiser_ema = model['denoiser_ema']
-            condition_encoder = model['condition']
-            mae.eval()
-            denoiser_ema.eval()
-            condition_encoder.eval()
+            recons_mov = self.t2m_moveencoder(feats_rst[..., :-4]).detach()
+            recons_emb = self.t2m_motionencoder(recons_mov, m_lens)
+            motion_mov = self.t2m_moveencoder(motions[..., :-4]).detach()
+            motion_emb = self.t2m_motionencoder(motion_mov, m_lens)
 
-            FID_list = []
-            for repeat_idx in range(1):
-                self.HUMANACTMetrics.init()
+            # t2m text encoder
+            text_emb = self.t2m_textencoder(word_embs, pos_ohot, text_lengths)[align_idx]
 
-                loop = tqdm(enumerate(test_dataloader), total = len(test_dataloader))
-                for idx, batch in loop:
-                    actions = batch["action"]
-                    motions = batch["motion"].detach().clone()
-                    lengths = batch["length"]
+            self.TM2TMetrics.update(
+                text_embeddings=text_emb,
+                recmotion_embeddings=recons_emb,
+                gtmotion_embeddings=motion_emb,
+                lengths=batch["length"]
+            )
 
-                    feats_rst = diffusion.sample(bs=len(lengths), lengths=lengths, condition=actions, steps=self.cfg.train.sample_steps, denoiser=denoiser_ema, motion_encoder=mae,
-                                                condition_encoder=condition_encoder, device=self.device)
-                    
-                    mask = batch["mask"]
-                    joints_rst = self.feats2joints(feats_rst.cpu(), mask)
-                    joints_ref = self.feats2joints(motions.cpu(), mask)
-                    joints_eval_rst = self.feats2joints_eval(feats_rst.cpu(), mask)
-                    joints_eval_ref = self.feats2joints_eval(motions.cpu(), mask)
+            loop.set_description(f'Test  Epoch [{epoch+1}/3]')
 
-                    rs_set = {
-                        "m_action": actions,
-                        "m_lens": lengths,
-                        "joints_rst": joints_rst,
-                        "joints_ref": joints_ref,
-                        "joints_eval_rst": joints_eval_rst,
-                        "joints_eval_ref": joints_eval_ref,
-                    }
+        result = self.TM2TMetrics.compute()
 
-                    self.HUMANACTMetrics.update(rs_set["m_action"],
-                                                rs_set["joints_eval_rst"],
-                                                rs_set["joints_eval_ref"],
-                                                rs_set["m_lens"])
-                    
-                result = self.HUMANACTMetrics.compute()
-                print(result)
-                FID_list.append(result['FID'])
-        else:
-            assert 0, condition_error
+        return result
+    
+    @torch.no_grad()
+    def test_mm_step(self, model, test_dataloader, diffusion, epoch):
+        mae = model['mae']
+        denoiser = model['denoiser']
+        condition_encoder = model['condition']
+        mae.eval()
+        denoiser.eval()
+        condition_encoder.eval()
 
-        return FID_list
+        self.MMMetrics.init()
+
+        loop = tqdm(enumerate(test_dataloader), total = len(test_dataloader))
+        for idx, batch in loop:
+            texts = batch["text"]
+            motions = batch["motion"].detach().clone()
+            lengths = batch["length"]
+            word_embs = batch["word_embs"].detach().clone()
+            pos_ohot = batch["pos_ohot"].detach().clone()
+            text_lengths = batch["text_len"].detach().clone()
+
+            texts = texts * self.cfg.test.mm_num_repeats
+            motions = motions.repeat_interleave(self.cfg.test.mm_num_repeats, dim=0)
+            lengths = lengths * self.cfg.test.mm_num_repeats
+            word_embs = word_embs.repeat_interleave(self.cfg.test.mm_num_repeats, dim=0)
+            pos_ohot = pos_ohot.repeat_interleave(self.cfg.test.mm_num_repeats, dim=0)
+            text_lengths = text_lengths.repeat_interleave(self.cfg.test.mm_num_repeats, dim=0)
+
+            motions = motions.to(self.device)
+            word_embs = word_embs.to(self.device)
+            pos_ohot = pos_ohot.to(self.device)
+            text_lengths = text_lengths.to(self.device)
+
+            feats_rst = diffusion.sample(bs=len(lengths), lengths=lengths, condition=texts, steps=self.cfg.train.sample_steps, denoiser=denoiser, motion_encoder=mae,
+                                        condition_encoder=condition_encoder, device=self.device)
+
+            # renorm for t2m evaluators
+            feats_rst = self.renorm4t2m(feats_rst)
+            motions = self.renorm4t2m(motions)
+
+            # t2m motion encoder
+            m_lens = lengths.copy()
+            m_lens = torch.tensor(m_lens, device=motions.device)
+            align_idx = np.argsort(m_lens.data.tolist())[::-1].copy()
+            motions = motions[align_idx]
+            m_lens = m_lens[align_idx]
+            m_lens = torch.div(m_lens, self.cfg.data.unit_length, rounding_mode="floor")
+
+            recons_mov = self.t2m_moveencoder(feats_rst[..., :-4]).detach()
+            recons_emb = self.t2m_motionencoder(recons_mov, m_lens)
+            motion_mov = self.t2m_moveencoder(motions[..., :-4]).detach()
+            motion_emb = self.t2m_motionencoder(motion_mov, m_lens)
+
+            self.MMMetrics.update(
+                mm_motion_embeddings=recons_emb.unsqueeze(0),
+                lengths=batch["length"]
+            )
+
+            loop.set_description(f'Test  Epoch [{epoch+1}/3]')
+
+        result = self.MMMetrics.compute()
+
+        return result
+                
     
